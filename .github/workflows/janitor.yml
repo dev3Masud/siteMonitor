@@ -1,0 +1,21 @@
+name: Janitor
+
+on:
+  workflow_run:
+    workflows: ['Site Monitor']
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete completed Site Monitor runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100" --paginate \
+            --jq '.workflow_runs[] | select(.name == "Site Monitor" and .status == "completed") | .id' \
+            | xargs -r -I{} sh -c 'gh api -X DELETE "repos/${{ github.repository }}/actions/runs/{}" || true'

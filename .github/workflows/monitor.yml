@@ -1,0 +1,89 @@
+name: Site Monitor
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'Comma-separated URLs to monitor (overrides urls.txt)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: site-monitor
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright browser
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run site monitor
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USERNAME: ${{ secrets.HF_USERNAME || '' }}
+          HF_DATASET: ${{ secrets.HF_DATASET || 'siteMonitor' }}
+          CLEANUP_DAYS: ${{ secrets.CLEANUP_DAYS || '7' }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.urls }}" ]; then
+            echo "${{ github.event.inputs.urls }}" | tr ',' '\n' > urls.txt
+          fi
+          python monitor.py
+
+      - name: Commit status log
+        env:
+          GH_USERNAME: ${{ secrets.GH_USERNAME || 'github-actions[bot]' }}
+          GH_EMAIL: ${{ secrets.GH_EMAIL || '41898282+github-actions[bot]@users.noreply.github.com' }}
+        run: |
+          git config user.name "$GH_USERNAME"
+          git config user.email "$GH_EMAIL"
+          git add status_log.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update site status log [skip ci]"
+            git push origin main 2>/dev/null || echo "push skipped (will be rewritten)"
+          fi
+
+      - name: Squash all history into a single commit
+        env:
+          GH_USERNAME: ${{ secrets.GH_USERNAME || 'github-actions[bot]' }}
+          GH_EMAIL: ${{ secrets.GH_EMAIL || '41898282+github-actions[bot]@users.noreply.github.com' }}
+        run: |
+          git config user.name "$GH_USERNAME"
+          git config user.email "$GH_EMAIL"
+          git fetch origin main --prune
+          git checkout -B tmp_work origin/main
+          git checkout --orphan clean_root
+          git add -A
+          git commit --allow-empty -m "site monitor single history [skip ci]"
+          git push --force origin clean_root:main
+        shell: bash
+
+      - name: Cleanup old workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100" --paginate \
+            --jq '.workflow_runs[] | select(.id != ${{ github.run_id }}) | .id' \
+            | xargs -r -I{} sh -c 'gh api -X DELETE "repos/${{ github.repository }}/actions/runs/{}" || true'
